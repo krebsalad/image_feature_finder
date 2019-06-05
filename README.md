@@ -9,3 +9,4 @@ Todo:
 5.add option to add beans runtime from color picker
 6.fix pathing
 7.add file where defined beans can be saved 
+6.add watershed to separate colling beans
