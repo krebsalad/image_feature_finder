@@ -2,11 +2,10 @@
 opencv python w basler camera bean finding helper tools
 
 Todo:
-1.clean markBean function
-2.use only mask algorithm
-3.create an abstract FindBeanFunction() based on hsv ranges
-4.find the beans based on given ranges
-5.add option to add beans runtime from color picker
-6.fix pathing
-7.add file where defined beans can be saved 
-6.add watershed to separate colling beans
+ 
+1.add watershed to separate colling beans
+2.create class to bean_finder and share data
+3.checkdifference before processing to prevent useless processing
+4.use old contours and masks when possible
+5.redraw a few times...
+6.multi threading
