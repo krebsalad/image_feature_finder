@@ -1,8 +1,8 @@
 # author:
 # Johan Mgina
-# Date modified: 5-6-2019
-# version: 0.8
-# Todo next: relative directories and also arguments
+# Date modified: 6-6-2019
+# version: 0.9.1
+# Todo next: watershed for overlapping beans, relative directories and also arguments
 
 from pypylon import pylon
 import cv2
@@ -12,24 +12,33 @@ import numpy as np
 from matplotlib import pyplot as plt
 import threading
 import queue
+import re
+import json
+import os
 
-# image queue vals
+
+# image vals
 image_queue = queue.Queue()
 q_size = 3
 time_between_images = 0
+camera_w = 2074
+camera_h = 1554
 
 # color picker vals
-image_color_picker = None
-bean_color_ranges = {
-    'kidney_boon_color_low': np.array([131,  75,  58]    ),   'kidney_boon_color_high': np.array([151,  95, 138]),
-    'koffie_boon_color_low': np.array([115,  37,  31] ),     'koffie_boon_color_high': np.array([135,  57, 111]),
-    'bruine_boon_color_low': np.array([  9, 149, 105]),     'bruine_boon_color_high': np.array([ 29, 169, 185]),
-    'zwarte_boon_color_low': np.array([ 97, 157,  58]),     'zwarte_boon_color_high': np.array([117, 177, 138]),
-    }
+color_picker_image = None
+clicked_bean_low = [0,0,0]
+clicked_bean_high = [0,0,0]
 
+# color ranges of the beans
+features = []
+
+#paths
+current_dir = os.getcwd()
+images_dir = current_dir + "/images"
 
 # kernels
 kernel_3x3 = np.array(([-1, -1, -1],[-1, 8, -1],[-1, -1, -1]))
+
 
 # image grabbing
 def grabImages(camera, converter):
@@ -46,7 +55,7 @@ def grabImages(camera, converter):
         else:
             # wait until atleast one image is processed
             if((time_between_images) > 0):
-                time.sleep(1)
+                time.sleep(time_between_images)
 
     print("camera stopped!!")
 
@@ -56,8 +65,8 @@ def initCamera():
 
     #set the dimentions og the image to grab
     camera.Open()
-    camera.Width.Value = 2074  # 0.8% max width of Basler puA2500-14uc camera
-    camera.Height.Value = 1554 # 0.8% max height of Basler puA2500-14uc camera
+    camera.Width.Value = camera_w  # 0.8% max width of Basler puA2500-14uc camera
+    camera.Height.Value =  camera_h# 0.8% max height of Basler puA2500-14uc camera
     camera.OffsetX.Value = 518
     # camera.AcquisitionFrameRate.SetValue(14)
 
@@ -86,6 +95,7 @@ def initCamera():
     converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
     return camera, converter
 
+
 # display images
 def displayImage(window_name, image, down_scale=3, wait=False, kill=False):
     height, width = image.shape[:2]
@@ -102,19 +112,19 @@ def displayImageHistogram(image):
     plt.hist(image.ravel(),256,[0,256])
     plt.show()
 
-def displayMaskFromChosenColor(event,x,y,flags,param):
+def displayMaskFromChosenPixel(event,x,y,f,p):
+    global clicked_bean_high
+    global clicked_bean_low
     if event == cv2.EVENT_LBUTTONDOWN:
-        pixel = image_color_picker[y,x]
+        pixel = color_picker_image[y,x]
+        clicked_bean_high = [pixel[0] + 10, pixel[1] + 10, pixel[2] + 40]
+        clicked_bean_low = [pixel[0] - 10, pixel[1] - 10, pixel[2] - 40]
+
+        image_mask = cv2.inRange(color_picker_image,np.array(clicked_bean_low),np.array(clicked_bean_high))
+        displayImage("Mask Result", image_mask, down_scale=1)
+
         print("picked color:", pixel)
-
-        #HUE, SATURATION, AND VALUE (BRIGHTNESS) RANGES. TOLERANCE COULD BE ADJUSTED.
-        upper =  np.array([pixel[0] + 10, pixel[1] + 10, pixel[2] + 40])
-        lower =  np.array([pixel[0] - 10, pixel[1] - 10, pixel[2] - 40])
-        print("color ranges:", lower, upper)
-
-        #A MONOCHROME MASK FOR GETTING A BETTER VISION OVER THE COLORS
-        image_mask = cv2.inRange(image_color_picker,lower,upper)
-        displayImage("Mask result", image_mask, down_scale=1)
+        print("low-high color ranges:", clicked_bean_high, clicked_bean_low)
 
 
 # image transformation (functions return an edited image)
@@ -254,15 +264,13 @@ def getNumOfEqualPixels(image1, image2, pixel_color=50):
     num_of_pixels = len(points[0])
     return num_of_pixels, res_image
 
-
 # bean selection
 def markBeanContoursOnImage(img_filled, img_original, find_color_alg="using_mask", show_result=False, show_num=3):
     # read image
     height, width = img_original.shape[:2]
 
     # create hsv image
-    img_hsv = cv2.GaussianBlur(img_original , (27,27), 3)
-    img_hsv = cv2.cvtColor(img_hsv, cv2.COLOR_BGR2HSV)
+    img_hsv = cv2.cvtColor(img_original.copy(), cv2.COLOR_BGR2HSV)
 
     # create mask
     image_mask_kidney = None
@@ -270,10 +278,10 @@ def markBeanContoursOnImage(img_filled, img_original, find_color_alg="using_mask
     image_mask_bruine = None
     image_mask_koffie = None
     if(find_color_alg == "using_mask"):
-        image_mask_kidney = cv2.inRange(img_hsv, bean_color_ranges["kidney_boon_color_low"],bean_color_ranges["kidney_boon_color_high"])
-        image_mask_zwarte = cv2.inRange(img_hsv, bean_color_ranges["zwarte_boon_color_low"],bean_color_ranges["zwarte_boon_color_high"])
-        image_mask_bruine = cv2.inRange(img_hsv, bean_color_ranges["bruine_boon_color_low"],bean_color_ranges["bruine_boon_color_high"])
-        image_mask_koffie = cv2.inRange(img_hsv, bean_color_ranges["koffie_boon_color_low"],bean_color_ranges["koffie_boon_color_high"])
+        image_mask_kidney = cv2.inRange(img_hsv, np.array(features[0][1]),np.array(features[0][2]))
+        image_mask_zwarte = cv2.inRange(img_hsv, np.array(features[3][1]),np.array(features[3][2]))
+        image_mask_bruine = cv2.inRange(img_hsv, np.array(features[2][1]),np.array(features[2][2]))
+        image_mask_koffie = cv2.inRange(img_hsv, np.array(features[1][1]),np.array(features[1][2]))
 
     # find contours
     ret, thresh = cv2.threshold(img_filled, 100, 200, 3)
@@ -315,22 +323,22 @@ def markBeanContoursOnImage(img_filled, img_original, find_color_alg="using_mask
                 print_text += str(pixel_color)
 
                 # kindney boon
-                if(isHsvColorInRange(pixel_color, bean_color_ranges["kidney_boon_color_low"], bean_color_ranges["kidney_boon_color_high"])):
+                if(isHsvColorInRange(pixel_color, features[0][1], features[0][2])):
                     img_contours = writeTextOnImage(img_contours, "kidney boon", centroid_x, centroid_y)
                     print_text += " - Type: kidney boon "
 
                 # koffie bonen
-                if(isHsvColorInRange(pixel_color, bean_color_ranges["koffie_boon_color_low"], bean_color_ranges["koffie_boon_color_high"])):
+                if(isHsvColorInRange(pixel_color, features[1][1], features[1][2])):
                     img_contours = writeTextOnImage(img_contours, "koffie boon", centroid_x, centroid_y)
                     print_text += " - Type: koffie boon "
 
                 # bruine boon
-                if(isHsvColorInRange(pixel_color, bean_color_ranges["bruine_boon_color_low"], bean_color_ranges["bruine_boon_color_high"])):
+                if(isHsvColorInRange(pixel_color, features[2][1], features[2][2])):
                     img_contours = writeTextOnImage(img_contours, "bruine boon", centroid_x, centroid_y)
                     print_text += " - Type: bruine boon "
 
                 # zwarte boon
-                if(isHsvColorInRange(pixel_color, bean_color_ranges["zwarte_boon_color_low"], bean_color_ranges["zwarte_boon_color_high"])):
+                if(isHsvColorInRange(pixel_color, bfeatures[3][1], features[3][2])):
                     img_contours = writeTextOnImage(img_contours, "zwarte boon", centroid_x, centroid_y)
                     print_text += " - Type: zwarte boon "
 
@@ -403,6 +411,90 @@ def markBeanContoursOnImage(img_filled, img_original, find_color_alg="using_mask
 
     return img_contours
 
+def identifyObjectsUsingHsvRanges(img_filled, img_original):
+    # read image
+    height, width = img_original.shape[:2]
+    num_of_feature_types = len(features)
+
+    # are there feature available
+    if(num_of_feature_types == 0):
+        print("No features available!!!")
+        return np.zeros((height,width,1), np.uint8)
+
+    # hsv image
+    img_hsv = cv2.cvtColor(img_original.copy(), cv2.COLOR_BGR2HSV)
+
+    # create bean masks
+    hsv_image_masks = [None]*num_of_feature_types
+    for i in range(0, num_of_feature_types):
+        mask = cv2.inRange(img_hsv, np.array(features[i][1]), np.array(features[i][2]))
+        hsv_image_masks[i] = mask
+        # displayImage("mask_"+features[i][0], mask)
+
+    # find contours
+    ret, thresh = cv2.threshold(img_filled, 100, 200, 3)
+    im2, contours, hierarchy = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
+    # identify contours
+    img_contours = img_original.copy()
+    counter = 0
+    for cnt in contours:
+        # get usefull data
+        M = cv2.moments(cnt)
+        centroid_x = int(M['m10']/M['m00'])
+        centroid_y = int(M['m01']/M['m00'])
+
+        # filter contours
+        if((int)(len(cnt)) < 30):
+            continue
+
+        if(centroid_x > width and centroid_y > height):
+            continue
+
+        # redraw contour in a threshold image
+        countour_area_image = getContourAreaImage(cnt, height, width)
+        countour_area_image = cv2.bitwise_not(countour_area_image)
+
+
+        # get num of pixels for each mask
+        num_of_pixels = [None]*num_of_feature_types
+        for i in range(0, num_of_feature_types):
+            num_of_pixels[i], res_image = getNumOfEqualPixels(countour_area_image, hsv_image_masks[i])
+
+        # highest number of pixels equal to the hsv mask
+        highest_num = max(num_of_pixels)
+
+        # get the index of the feature
+        feature_type = -1
+        for i in range(0, num_of_feature_types):
+            if(num_of_pixels[i] == highest_num and num_of_pixels[i] != 0):
+                feature_type = i
+
+        # setup som print data
+        print_text = "Contour"+str(counter)+" centroid: ("+str(centroid_x)+","+str(centroid_y)+") "
+
+        # some checks
+        if(feature_type == -1):
+            cv2.drawContours(img_contours, [cnt], 0, (0,255,0), 3)
+            print(print_text + "unidentified")
+            counter+=1
+            continue
+
+        # bean data
+        feature_name = features[feature_type][0]
+
+        # draw contour
+        cv2.circle(img_contours,((int)(centroid_x), (int)(centroid_y)),10,(0,0,255),2)
+        cv2.drawContours(img_contours, [cnt], 0, (0,255,0), 3)
+        img_contours = writeTextOnImage(img_contours, feature_name, centroid_x, centroid_y, font_rgb_color=(0,0,255))
+
+        # print text
+        print(print_text + "identified Object with feature:"+feature_name)
+        counter+=1
+        continue
+
+    return img_contours
+
 
 # solutions
 def solution1(image):
@@ -416,7 +508,7 @@ def solution1(image):
     img_filled = fillInHoles(img_edges)
 
     # mark beans
-    img_marked = markBeanContoursOnImage(img_filled, image, find_color_alg="using_mask") # contour_average using_mask
+    img_marked = identifyObjectsUsingHsvRanges(img_filled, image)
 
     return img_marked
 
@@ -426,15 +518,9 @@ def solution2(image):
 
     # edges
     img_median = markPixelsAboveMedian(img_gray)
-    displayImage("median", img_median)
-
-    # close image
-    # img_closed = closeImageEdges(img_median)
-    # displayImage("closed", img_closed)
 
     # fillInHoles
     img_filled = fillInHoles(img_median)
-    displayImage("filled", img_filled)
 
     # mark beans
     img_marked = markBeanContoursOnImage(img_filled, image, find_color_alg="using_mask")
@@ -484,97 +570,157 @@ def step_by_step_demo(image):
 
 #  main
 if (__name__) == "__main__":
-    # for timing
-    tick1 = 0
-    tick2 = 0
-    delay_ms = 1 # delay between images
+    print("running from ws:" + str(current_dir))
 
-    # camera
+    # default vals
     camera = None
     converter = None
-    img_counter = 0
+    delay = 1
+    # test_image = np.zeros((camera_w,camera_h,3), np.uint8)
+    test_image = cv2.imread((images_dir+'/image1.bmp'), -1)
 
-    # parse/read/set args
-    mode = "test" # default
-    test_image = cv2.imread('/home/iot/practicum_opdrachten/opgaven_iot_vis/images/Bonen_110k_diaf_8_gain_0.bmp', -1)
-    num_args = len(sys.argv)
+    # set mode
+    mode = [False, False] # mode[0] = process test image(False) or from cam(True)  # mode[1] = alternativly view only(False) or add_feature(True)
+    for arg in sys.argv:
+        if((arg == "h" or arg == "help") and len(sys.argv) == 2):
+            print("\nOptions:\nrun_camera : run with camera\nadd_feature : add feature from hsv range to /beans.json (loads on start)\nimage : start with image from /images/ directory")
+            sys.exit()
 
-    if(num_args > 1):
-        mode = sys.argv[1]
+        if(arg == "run_camera"):
+            mode[0] = True
 
-    if(num_args > 2):
-        test_image = cv2.imread(sys.argv[2], -1)
+        if(arg == "add_feature"):
+            mode[1] = True
 
-    # set test image
-    if(mode == "test"):
-        image_queue.put(test_image)
+        if(arg == "image"):
+            print("test image name from images file:")
+            test_image = cv2.imread((images_dir+'/'+input()+''), -1)
+
+    # load settings
+    json_data = None
+    with open(current_dir+"/beans.json") as file:
+        features = json.load(file)
+
+    # single image
+    if not (mode[0]):
+        delay = 0   # wait for input
 
     # capture and run requires camera
-    if(mode == "run" or mode == "view" or mode == "pick_color"):
+    if(mode[0]):
         camera, converter = initCamera()
         capture_thread = threading.Thread(target=grabImages, args=(camera,converter))
         capture_thread.start()
+        delay = 1 # 1 ms
+        print("camera is running..")
 
-        # pick a color from a hsv image and create mask
-        if(mode == "pick_color"):
-            # pick color cb on HSV image with window named HSV
-            image_color_picker = test_image.copy()
-            cv2.imshow("HSV_color_picker", image_color_picker)
-            cv2.setMouseCallback("HSV_color_picker", displayMaskFromChosenColor)
+    # pick a color from a hsv image and create mask
+    if(mode[1]):
+        # setup image
+        height, width = test_image.shape[0:2]
+        color_picker_image = cv2.cvtColor(test_image.copy(),cv2.COLOR_BGR2HSV)
+        color_picker_image = cv2.resize(color_picker_image, ((int)(width/3)+1, (int)(height/3)+1))
 
-        if(mode == "view"):
-            print("press <spacebar> to take image")
+        # create mask and display
+        mask = np.zeros((height,width,1), np.uint8)
+        displayImage("Mask Result", mask)
+        displayImage("HSV_color_picker", color_picker_image, down_scale=1)
 
+        # callback on click
+        cv2.setMouseCallback("HSV_color_picker", displayMaskFromChosenPixel)
 
-    # processing thread
+        # info
+        print("click on a pixel on window 'HSV_color_picker' to create a hsv image mask")
+        print("press <spacebar> on to add ranges as a feature")
+
+    # specific modes
+    if not (mode[1]):
+        image_queue.put(test_image)
+
+    if(mode[0] and not mode[1]):
+        print("press <spacebar> to take image")
+
+    if(mode[0] and mode[1]):
+        delay = 1000 # 1 s
+
+    # for util
+    tick_start = 0
+    tick_end = 0
+    snapshot_counter = 0
+
+    # process images
     while(True):
-        # find beans if image available
+        image = test_image.copy()
         if not (image_queue.empty()):
-
             # get image
             image = image_queue.get(block=True, timeout=None)
 
             # timer
-            tick1 = cv2.getTickCount()
+            tick_start = cv2.getTickCount()
 
             # process images
-            if(mode == "run" or mode == "test"):
+            if not (mode[1]):
                 result = solution1(image)
                 # result = solution2(image)
                 # result = step_by_step_demo(image)
                 displayImage("result", result)
-                displayImage("original", image)
 
-            if(mode == "pick_color"):
+            if(mode[1]):
                 # create hsv image
                 image_hsv = cv2.cvtColor(image.copy(),cv2.COLOR_BGR2HSV)
-                down_scale = 3
                 height, width = image_hsv.shape[0:2]
-                image_color_picker = cv2.resize(image_hsv, ((int)(width/down_scale)+1, (int)(height/down_scale)+1))
-                cv2.imshow("HSV_color_picker", image_color_picker)
+                color_picker_image = cv2.resize(image_hsv, ((int)(width/3)+1, (int)(height/3)+1))
+                cv2.imshow("HSV_color_picker", color_picker_image)
 
-            if(mode == "view"):
-                # original image
-                displayImage("view", image)
-                k = cv2.waitKey(1)
-                if (k == 32):
-                    img_counter +=1
-                    path = "/home/iot/practicum_opdrachten/opgaven_iot_vis/images/image" + str(img_counter) + ".bmp"
-                    cv2.imwrite(path,image)
-                    print("image made and saved in: " + path)
+            last_image = image.copy()
+            tick_end = cv2.getTickCount()
+            time_between_images = (tick_end - tick_start)/ cv2.getTickFrequency()
 
-            # print time took
-            tick2 = cv2.getTickCount()
-            time_between_images = (tick2 - tick1)/ cv2.getTickFrequency()
-            # print("Time took to prosess image:" + str(time_between_images) + "seconds")
+        # original image
+        displayImage("original", image)
 
-        # delay between processing images and exit (escape)
-        key = cv2.waitKey((int)(1))
+        # delay get get input
+        key = cv2.waitKey((int)(delay))
+
+        # spacebar
+        if (key == 32):
+            # add bean
+            if(mode[1]):
+                # get input
+                print("Name of to identify feature:")
+                in_str = str(input())
+
+                # text
+                new_bean = [in_str, clicked_bean_low, clicked_bean_high]
+                features.append(new_bean)
+
+                # write data
+                text = []
+                text.append("[")
+                for i, bean_type in enumerate(features):
+                    text.append("\n"+str(bean_type))
+                    if(i + 1 != (len(features))):
+                        text[i + 1] += ","
+                text.append("]")
+
+                # write file
+                with open(current_dir+"/beans.json", "w") as file:
+                    for txt in text:
+                        txt = re.sub("'", '"',txt)
+                        file.write(txt)
+
+                print("saved features at "+current_dir+"/beans.json")
+
+            # make snapshot
+            else:
+                snapshot_counter +=1
+                path = images_dir+"/image"+ str(snapshot_counter) + ".bmp"
+                cv2.imwrite(path,image)
+                print("image made and saved in: " + path)
+
+        # exit
         if (key == ord('\x1b')):
             break
 
-
-    # exit
     cv2.destroyAllWindows()
     if(camera):
         camera.StopGrabbing()
