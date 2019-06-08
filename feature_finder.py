@@ -1,8 +1,7 @@
 # author:
 # Johan Mgina
 # Date modified: 8-6-2019
-# version: 0.9.6
-# Todo next: watershed for overlapping beans, relative directories and also arguments
+# version: 0.9.7
 
 from pypylon import pylon
 import cv2
@@ -18,6 +17,11 @@ import glob
 
 ## image sharing ##
 image_queue = queue.Queue()
+exit_threads = False
+
+# display queue
+queue1 = queue.Queue()
+queue2 = queue.Queue()
 q_size = 3
 
 # acqusition
@@ -57,8 +61,8 @@ def initCamera():
     converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
     return camera, converter
 
-def grabImages(camera, converter):
-    while camera.IsGrabbing():
+def grabImagesThread(camera, converter):
+    while camera.IsGrabbing() and not exit_threads:
         # grab image when queue is not full
         if(image_queue.qsize() < q_size):
             grabResult = camera.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
@@ -71,16 +75,34 @@ def grabImages(camera, converter):
 
     print("camera stopped!!")
 
+def showScaledImage(window_name, image, down_scale=True):
+    rezised_image = image.copy()
+    height, width = rezised_image.shape[0:2]
+    if(down_scale):
+        rezised_image = cv2.resize(rezised_image, ((int)(width/3)+1, (int)(height/3)+1))
+    cv2.imshow(window_name, rezised_image)
+
+def displayQueueThread(win_name, queue):
+    while(True and not exit_threads):
+        if not (queue.empty()):
+            display = queue.get(block=True, timeout=None)
+            showScaledImage(win_name, display)
+
+        if(cv2.waitKey(10) == 1048603):
+            cv2.destroyWindow(win_name)
+            break
+
 
 ## find ellipse like objects using hsv colors ##
 class FeatureFinder:
     # main routine functions
-    def __init__(self, mode, image_queue, height=1554, width=2074, capture_thread=None, name="feature_finder", verbose=False, max_contours=50):
+    def __init__(self, mode, image_queue, display_queue_1=None, display_queue_2=None, height=1554, width=2074, name="feature_finder", verbose=False, max_contours=50):
         # setup
         self.name = name
         self.mode = mode
         self.image_queue = image_queue
-        self.capture_thread = capture_thread
+        self.display_queue_1 = display_queue_1
+        self.display_queue_2 = display_queue_2
         self.verbose = verbose
 
         #paths
@@ -121,11 +143,13 @@ class FeatureFinder:
         verbose_text = ""
         print_text = ""
 
-        # capture and run requires camera
+        # contious
         if(self.mode[0]):
             self.delay = 1 # 1 ms
-            self.capture_thread.start()
-            print("camera is running..")
+
+        # single
+        if not (self.mode[0]):
+            self.delay = 0 # wait for input
 
         # processing setup
         if(self.mode[1]):
@@ -133,61 +157,75 @@ class FeatureFinder:
             if not (os.path.exists(self.save_file)):
                 with open(self.save_file, "w+") as file:
                     file.write("[]")
-                    verbose_text += "created file "+self.save_file + "\n"
+                    verbose_text += self.name+": created file "+self.save_file + "\n"
 
             # load data
             with open(self.save_file) as file:
                     self.features = json.load(file)
 
+            # print text
             self.num_of_feature_types = len(self.features)
-            print("succesfully loaded features")
-            verbose_text += "Features:"+str(self.features) + "\n"
-            self.delay = 1
+            print(self.name+": succesfully loaded features")
+            verbose_text += self.name+":Features:"+str(self.features) + "\n"
 
-        # pick a color from a hsv image and create mask
-        if(self.mode[2]):
-            # create mask
-            self.color_picker_image = cv2.resize(self.image_hsv.copy(), (self.display_width, self.display_height))
-            self.color_picker_mask = cv2.resize(self.base_image_s.copy(), (self.display_width, self.display_height))
+        # display and other features if display allowed
+        if not (self.mode[3]):
+            # pick a color from a hsv image and create mask
+            if(self.mode[2]):
+                # create mask
+                self.color_picker_image = cv2.resize(self.image_hsv.copy(), (self.display_width, self.display_height))
+                self.color_picker_mask = cv2.resize(self.base_image_s.copy(), (self.display_width, self.display_height))
 
-            # color picker vals
-            self.clicked_bean_low = [0,0,0]
-            self.clicked_bean_high = [0,0,0]
+                # color picker vals
+                self.clicked_pixel = [0,0,0]
+                self.color_picker_range_low = [0,0,0]
+                self.color_picker_range_high = [0,0,0]
+                self.color_picker_range = [10,10,40]
 
-            # display images
-            self.displayImage("Mask Result", self.color_picker_mask, down_scale=False)
-            self.displayImage("HSV_color_picker", self.color_picker_image, down_scale=False)
+                # display images
+                self.displayImage("Mask Result", self.color_picker_mask, down_scale=False)
+                self.displayImage("HSV_color_picker", self.color_picker_image, down_scale=False)
 
-            # callback on click
-            cv2.setMouseCallback("HSV_color_picker", self.displayMaskFromChosenPixel)
+                # callback on click
+                cv2.setMouseCallback("HSV_color_picker", self.displayMaskFromChosenPixel)
 
-            # info
-            print_text += "click on a pixel on window 'HSV_color_picker' to create a hsv image mask\n"
-            print_text += "press <spacebar> on to add ranges as a feature\n"
+            # make image when running camera
+            if(self.mode[0] and not self.mode[1] and not self.mode[2]):
+                self.delay = 1 # 1 ms
 
-        # view only mode
-        if(not self.mode[0]):
-            self.delay = 0 # waitKey
+            # pick_color mode when running camera
+            if(self.mode[0] and self.mode[2]):
+                self.delay = 1000 # 1 s
 
-        # make image when running camera
-        if(self.mode[0] and not self.mode[1] and not self.mode[2]):
-            print_text += "press <spacebar> to take image\n"
-            self.delay = 1 # 1 ms
+            # print input
+            print_text += self.name+" input list:\n"
+            if (self.mode[2]):
+                print_text += "  : click on a pixel on window 'HSV_color_picker' to create a hsv image mask\n"
+                print_text += "  : use arrow keys left and right to change hsv range Value for the mask"
+                print_text += "  : use arrow keys up and down to change hsv ranges HUE and Saturation for the mask"
+                print_text += "  : press <spacebar> to add ranges feature\n"
 
-        # pick_color mode when running camera
-        if(self.mode[0] and self.mode[2]):
-            self.delay = 1000 # 1 s
+            if (self.mode[0] and not self.mode[1] and not self.mode[2]):
+                print_text += "  : press <spacebar> to make image\n"
 
-        # print
-        if(self.delay == 0):
-            print()
+            print_text += "  : press <esc> to exit\n"
+
+            if(self.delay == 0):
+                print_text += "  : press any other key to continue to next image\n"
+        else:
+            if not (display_queue_1):
+                print(self.name+" no display queue for resulting images!!")
+            if not (display_queue_2):
+                print(self.name+" no display queue for original images!!")
+            verbose = False
 
         # print info
-        verbose_text += "set delay to "+ str(self.delay) + "\n"
-        print_text += "succesfully initialised feature finder: "+self.name+"\npress esc to exit"
+        verbose_text += self.name+": set delay to "+ str(self.delay) + "\n"
         if(self.verbose):
             print(verbose_text)
-        print(print_text)
+
+
+        print(self.name+": succesfully initialised\n" + print_text)
 
     def run(self):
         # for util
@@ -196,7 +234,6 @@ class FeatureFinder:
 
         # process images
         while(True):
-
             # get and edit image
             if not (self.image_queue.empty()):
                 # get image and set data
@@ -213,7 +250,7 @@ class FeatureFinder:
 
                 # process
                 if (self.mode[1]):
-                    print("processing image...")
+                    print(self.name+": processing image...")
 
                     # timer
                     tick_start = cv2.getTickCount()
@@ -221,91 +258,136 @@ class FeatureFinder:
                     # process image
                     self.solution1()
 
+                    # print data
                     tick_end = cv2.getTickCount()
                     self.time_between_images = (tick_end - tick_start)/ cv2.getTickFrequency()
-                    print("took "+str(self.time_between_images)+" to process image")
+                    print(self.name+": took "+str(self.time_between_images)+" to process image")
 
-            # update mask
-            if(self.mode[2]):
-                self.image_hsv = cv2.cvtColor(self.current_image.copy(),cv2.COLOR_BGR2HSV)
-                self.color_picker_image = cv2.resize(self.image_hsv.copy(), (self.display_width, self.display_height))
-                self.color_picker_mask = cv2.inRange(self.color_picker_image.copy(),np.array(self.clicked_bean_low),np.array(self.clicked_bean_high))
-                self.displayImage("HSV_color_picker", self.color_picker_image, down_scale=False)
-                self.displayImage("Mask Result", self.color_picker_mask, down_scale=False)
+                # add to display queue
+                if (mode[3]):
+                    if(self.display_queue_1):
+                        self.display_queue_1.put(self.image_result.copy())
+                    if(self.display_queue_2):
+                        self.display_queue_2.put(self.current_image.copy())
 
-            # display images
-            if (self.mode[1]):
-                self.displayImage("found_features", self.image_result.copy())
+            # display images and handle input
+            if (not mode[3]):
+                # update mask
+                if(self.mode[2]):
+                    self.updateColorPickerDisplay()
 
-            # always display original image
-            self.displayImage("original", self.current_image.copy())
+                if (self.mode[1]):
+                    self.displayImage("found_features", self.image_result.copy())
 
-            # handle input / delay / read keys
-            if not (self.handleInput()):
-                print("exiting..")
-                return
+                # always display original image
+                self.displayImage("original", self.current_image.copy())
+
+                # handle input / delay / read keys
+                if not (self.handleInput()):
+                    print(self.name+": exiting..")
+                    return
+
+    def updateColorPickerDisplay(self):
+        self.image_hsv = cv2.cvtColor(self.current_image.copy(),cv2.COLOR_BGR2HSV)
+        self.color_picker_image = cv2.resize(self.image_hsv.copy(), (self.display_width, self.display_height))
+        self.color_picker_range_high = [self.clicked_pixel[0] + self.color_picker_range[0], self.clicked_pixel[1] + self.color_picker_range[1], self.clicked_pixel[2] + self.color_picker_range[2]]
+        self.color_picker_range_low = [self.clicked_pixel[0] - self.color_picker_range[0], self.clicked_pixel[1] - self.color_picker_range[1], self.clicked_pixel[2] - self.color_picker_range[2]]
+        self.color_picker_mask = cv2.inRange(self.color_picker_image.copy(),np.array(self.color_picker_range_low),np.array(self.color_picker_range_high))
+        self.displayImage("HSV_color_picker", self.color_picker_image, down_scale=False)
+        self.displayImage("Mask Result", self.color_picker_mask, down_scale=False)
 
     # input
     def handleInput(self):
-        # delay get get input
-        key = cv2.waitKey((int)(self.delay))
+        key = -1
 
-        # spacebar
-        if (key == 32):
-            # add bean
-            if(self.mode[2]):
-                # get input
-                print("Name of to identify feature:")
-                in_str = str(input())
+        # repeat for next keys
+        while(key == -1):
+            key = -2
+            # delay get get input
+            key = cv2.waitKeyEx((int)(self.delay))
 
-                # text
-                new_bean = [in_str, self.clicked_bean_low, self.clicked_bean_high]
-                self.features.append(new_bean)
+            # spacebar
+            if not (self.mode[3]):
+                if (key == 32):
 
-                # write data
-                text = []
-                text.append("[")
-                for i, bean_type in enumerate(self.features):
-                    text.append("\n"+str(bean_type))
-                    if(i + 1 != (len(self.features))):
-                        text[i + 1] += ","
-                text.append("]")
+                    # add bean
+                    if(self.mode[2]):
+                        # get input
+                        print(self.name+": Name of to identify feature:")
+                        in_str = str(input())
 
-                # write file
-                with open(self.save_file, "w") as file:
-                    for txt in text:
-                        txt = re.sub("'", '"',txt)
-                        file.write(txt)
+                        # text
+                        new_bean = [in_str, self.color_picker_range_low, self.color_picker_range_high]
+                        self.features.append(new_bean)
 
-                print("saved features at "+self.save_file)
+                        # write data
+                        text = []
+                        text.append("[")
+                        for i, bean_type in enumerate(self.features):
+                            text.append("\n"+str(bean_type))
+                            if(i + 1 != (len(self.features))):
+                                text[i + 1] += ","
+                        text.append("]")
 
-            # make snapshot
-            if(self.mode[0] and not self.mode[1] and not self.mode[2]):
-                self.snapshot_counter +=1
-                pth = self.images_dir+"/image"+ str(self.snapshot_counter) + ".bmp"
-                if(os.path.exists(self.images_dir+"/")):
-                    cv2.imwrite(pth,self.current_image)
-                    print("image made and saved in: " + pth)
-                else:
-                    print("could not find dir: "+ self.images_dir)
+                        # write file
+                        with open(self.save_file, "w") as file:
+                            for txt in text:
+                                txt = re.sub("'", '"',txt)
+                                file.write(txt)
 
-        # escape
-        if (key == ord('\x1b')):
-            return False
+                        print(self.name+": saved features at "+self.save_file)
+                        key = -1
+
+                    # make snapshot
+                    if(self.mode[0] and not self.mode[1] and not self.mode[2]):
+                        self.snapshot_counter +=1
+                        pth = self.images_dir+"/image"+ str(self.snapshot_counter) + ".bmp"
+                        if(os.path.exists(self.images_dir+"/")):
+                            cv2.imwrite(pth,self.current_image)
+                            print(self.name+": image made and saved in: " + pth)
+                        else:
+                            print(self.name+": could not find dir: "+ self.images_dir)
+
+                # arrow key up
+                if(key == 65362):
+                    if(self.mode[2]):
+                        self.color_picker_range[0] += 5
+                        self.color_picker_range[1] += 5
+                        self.updateColorPickerDisplay()
+                        print(self.name+": new hsv range for masking "+str(self.color_picker_range_low) +"-"+str(self.color_picker_range_high))
+
+                # arror key down
+                if(key == 65364):
+                    if(self.mode[2]):
+                        self.color_picker_range[0] -= 5
+                        self.color_picker_range[1] -= 5
+                        self.updateColorPickerDisplay()
+                        print(self.name+": hsv range for masking "+str(self.color_picker_range_low) +"-"+str(self.color_picker_range_high))
+
+                # arror key right
+                if(key == 65363):
+                    if(self.mode[2]):
+                        self.color_picker_range[2] += 10
+                        self.updateColorPickerDisplay()
+                        print(self.name+": hsv range for masking "+str(self.color_picker_range_low) +"-"+str(self.color_picker_range_high))
+
+                # arror key left
+                if(key == 65361):
+                    if(self.mode[2]):
+                        self.color_picker_range[2] -= 10
+                        self.updateColorPickerDisplay()
+                        print(self.name+": hsv range for masking "+str(self.color_picker_range_low) +"-"+str(self.color_picker_range_high))
+
+            # escape
+            if (key == 1048603):
+                return False
         return True
 
     def displayMaskFromChosenPixel(self, event, x, y, f, p):
         if event == cv2.EVENT_LBUTTONDOWN:
-            pixel = self.color_picker_image[y,x]
-            self.clicked_bean_high = [pixel[0] + 10, pixel[1] + 10, pixel[2] + 40]
-            self.clicked_bean_low = [pixel[0] - 10, pixel[1] - 10, pixel[2] - 40]
-            print("picked color:" + str(pixel))
-            print("low-high color ranges:" + str(self.clicked_bean_low) + " " + str(self.clicked_bean_high))
-
-            self.color_picker_image = cv2.resize(self.image_hsv.copy(), (self.display_width, self.display_height))
-            self.color_picker_mask = cv2.inRange(self.color_picker_image.copy(),np.array(self.clicked_bean_low),np.array(self.clicked_bean_high))
-
-            self.displayImage("Mask Result", self.color_picker_mask.copy(), down_scale=False)
+            self.clicked_pixel = self.color_picker_image[y,x]
+            self.updateColorPickerDisplay()
+            print(self.name+": hsv range for masking "+str(self.color_picker_range_low) +"-"+str(self.color_picker_range_high))
 
     # solutions
     def solution1(self):
@@ -333,7 +415,7 @@ class FeatureFinder:
 
             # print / display
             if(self.verbose):
-                print("Difference value = "+str(diff_value))
+                print(self.name +": Difference value = "+str(diff_value))
                 self.displayImage("image_gray", img_b_gray.copy())
                 self.displayImage("image_edges", self.image_edges.copy())
                 self.displayImage("image_filled", self.image_filled.copy())
@@ -348,9 +430,9 @@ class FeatureFinder:
 
         else:
             # print / display
-            print("skipping image")
+            print(self.name +": skipping image")
             if(self.verbose):
-                print("Difference value = "+str(diff_value))
+                print(self.name +": Difference value = "+str(diff_value))
                 self.displayImage("image_gray", img_b_gray.copy())
                 self.displayImage("image_edges", self.image_edges.copy())
                 self.displayImage("image_filled", self.image_filled.copy())
@@ -374,12 +456,12 @@ class FeatureFinder:
         im2, contours, hierarchy = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
         if(len(contours) > self.max_contours):
             self.image_result = self.current_image.copy()
-            print("too many contours "+str(len(contours)) + ", skipping...")
+            print(self.name +": too many contours "+str(len(contours)) + ", skipping...")
             return
 
         # are there feature available
         if(self.num_of_feature_types == 0):
-            print("No features available!!!")
+            print(self.name +": No features available!!!")
             self.image_result = self.base_image.copy()
             return
 
@@ -395,6 +477,7 @@ class FeatureFinder:
         # identify contours
         self.image_result = self.current_image.copy()
         counter = 0
+        print(self.name +":\n")
         for cnt in contours:
             # to print
             print_text = ""
@@ -419,11 +502,11 @@ class FeatureFinder:
             # get num of pixels for each mask
             num_of_pixels = [None]*self.num_of_feature_types
             res_images = [None]*self.num_of_feature_types
-            verbose_text += "num of pixels on ranges:\n"
+            verbose_text += "  num of pixels on ranges:\n"
             for i in range(0, self.num_of_feature_types):
                 num_of_pixels[i], res_images[i] = self.getNumOfEqualPixels(countour_area_image, hsv_image_masks[i])
                 f_name = self.features[i][0]
-                verbose_text += "| "+f_name+" no. of px ="+str(num_of_pixels[i]) + " |\n"
+                verbose_text += "  | "+f_name+" no. of px ="+str(num_of_pixels[i]) + " |\n"
 
             # highest number of pixels equal to the hsv mask
             highest_num = max(num_of_pixels)
@@ -435,7 +518,7 @@ class FeatureFinder:
                     feature_type = i
 
             # setup som print data
-            print_text = "Contour"+str(counter)+" centroid: ("+str(centroid_x)+","+str(centroid_y)+") "
+            print_text += "  Contour"+str(counter)+" centroid: ("+str(centroid_x)+","+str(centroid_y)+") "
 
             # some checks
             if(feature_type == -1):
@@ -564,7 +647,7 @@ if (__name__) == "__main__":
 
     # read args
     test_image = cv2.imread((os.getcwd()+'/images/image1.bmp'), -1)
-    mode = [False, False, False] # mode[0] = single_view(False) or continous_view(True)  # mode[1] = view_image(False) or process image(True) # mode[2]  = view only(False) or add_feature(True)
+    mode = [False, False, False, False] # mode[0] = single_view(False) or continous_view(True)  # mode[1] = view_image(False) or process image(True) # mode[2]  = view only(False) or add_feature(True)
     verbose = False
     for arg in sys.argv:
         if((arg == "h" or arg == "help") and len(sys.argv) == 2):
@@ -581,13 +664,13 @@ if (__name__) == "__main__":
             sys.exit()
 
         if(arg == "with_camera"):
-            mode[0] = True  # camera
+            mode[0] = True  # run in continous mode with camera
 
         if(arg == "find_features"):
-            mode[1] = True  # process images
+            mode[1] = True  # process images aswell
 
         if(arg == "add_feature"):
-            mode[2] = True  # add feature
+            mode[2] = True  # add feature using hsv image masks
 
         if(arg == "with_image"):
             print("test image name from images file:")
@@ -618,29 +701,45 @@ if (__name__) == "__main__":
                 print("exiting")
                 sys.exit()
 
+        if(arg == "threading"):
+            mode[2] = True # multi threading (will disable view from feature finder == no add_Feature and no display and always continous)
+
         if(arg == "verbose"):
             verbose = True
 
     # init camera or test image
     capture_thread = None
+    display_q1_thread = None
+    display_q2_thread = None
     camera = None
     converter = None
 
-    # setup camera or test image
+    # setup camera
     if(mode[0]):
         camera, converter = initCamera()
-        capture_thread = threading.Thread(target=grabImages, args=(camera,converter))
+        capture_thread = threading.Thread(target=grabImagesThread, args=(camera,converter))
+        capture_thread.start()
 
+    # for threading
+    if(mode[2]):
+        display_q1_thread = threading.Thread(target=displayQueueThread, args=("result image",queue1))
+        display_q2_thread = threading.Thread(target=displayQueueThread, args=("original image",queue2))
+        display_q1_thread.start()
+        display_q2_thread.start()
 
     # create bean finder
-    bean_finder = FeatureFinder(mode, image_queue, verbose=verbose, height=test_image.shape[0], width=test_image.shape[1], capture_thread=capture_thread, name="bean finder")
+    bean_finder = FeatureFinder(mode, image_queue, display_queue_1=queue1, display_queue_2=queue2, verbose=verbose, height=test_image.shape[0], width=test_image.shape[1], name="bean finder")
 
     # run
     bean_finder.run()
 
     #exit
+    exit_threads = True
     cv2.destroyAllWindows()
     if(camera):
         camera.StopGrabbing()
+    if(display_q1_thread):
+        display_q1_thread.join()
+    if(display_q2_thread):
+        display_q2_thread.join()
     sys.exit()
-
