@@ -13,19 +13,19 @@ startup:
 
 
 features:
-get image edges
-fill within the edges
-identify contours based on hsv mask
-multiple hsv color ranges to indetify beans
-view mode only now possible
-make snapshots in view mode
-run with images out of a directory
-pick a color from image at runtime and display corresponding mask
-save the new feature in a json file
-load features from json file
-only requires image queue
-can change image dimensions runtime
-track difference between images and prevent unneeded processing
+1. get image edges
+2. fill within the edges
+3. identify contours based on hsv mask
+4. multiple hsv color ranges to indetify beans
+5. view mode only now possible
+6. make snapshots in view mode
+7. run with images out of a directory
+8. pick a color from image at runtime and display corresponding mask
+9. save the new feature in a json file
+10. load features from json file
+11. only requires image queue
+12. can change image dimensions runtime
+13. track difference between images and prevent unneeded processing
 
 
 Todo:
