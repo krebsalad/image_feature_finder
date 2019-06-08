@@ -1,7 +1,8 @@
 # author:
 # Johan Mgina
 # Date modified: 8-6-2019
-# version: 0.9.7
+# version: 0.9.6
+# Todo next: watershed for overlapping beans, relative directories and also arguments
 
 from pypylon import pylon
 import cv2
@@ -78,17 +79,19 @@ def grabImagesThread(camera, converter):
 def showScaledImage(window_name, image, down_scale=True):
     rezised_image = image.copy()
     height, width = rezised_image.shape[0:2]
-    if(down_scale):
+    if (down_scale):
         rezised_image = cv2.resize(rezised_image, ((int)(width/3)+1, (int)(height/3)+1))
+    print("displaying image")
     cv2.imshow(window_name, rezised_image)
+    cv2.waitKey(33) # take a few seconds before other thread takes over
 
 def displayQueueThread(win_name, queue):
-    while(True and not exit_threads):
+    while not exit_threads:
         if not (queue.empty()):
             display = queue.get(block=True, timeout=None)
             showScaledImage(win_name, display)
 
-        if(cv2.waitKey(10) == 1048603):
+        if(cv2.waitKey(1) == ord('\x1b')):
             cv2.destroyWindow(win_name)
             break
 
@@ -143,6 +146,23 @@ class FeatureFinder:
         verbose_text = ""
         print_text = ""
 
+        # create new file if not available
+        if not (os.path.exists(self.save_file)):
+            with open(self.save_file, "w+") as file:
+                file.write("[]")
+                verbose_text += self.name+": created file "+self.save_file + "\n"
+
+        # load data
+        with open(self.save_file) as file:
+                self.features = json.load(file)
+
+        # print text
+        self.num_of_feature_types = len(self.features)
+        print(self.name+": succesfully loaded features")
+        verbose_text += self.name+":Features:"+str(self.features) + "\n"
+
+
+
         # contious
         if(self.mode[0]):
             self.delay = 1 # 1 ms
@@ -150,23 +170,6 @@ class FeatureFinder:
         # single
         if not (self.mode[0]):
             self.delay = 0 # wait for input
-
-        # processing setup
-        if(self.mode[1]):
-            # create new file if not available
-            if not (os.path.exists(self.save_file)):
-                with open(self.save_file, "w+") as file:
-                    file.write("[]")
-                    verbose_text += self.name+": created file "+self.save_file + "\n"
-
-            # load data
-            with open(self.save_file) as file:
-                    self.features = json.load(file)
-
-            # print text
-            self.num_of_feature_types = len(self.features)
-            print(self.name+": succesfully loaded features")
-            verbose_text += self.name+":Features:"+str(self.features) + "\n"
 
         # display and other features if display allowed
         if not (self.mode[3]):
@@ -264,14 +267,14 @@ class FeatureFinder:
                     print(self.name+": took "+str(self.time_between_images)+" to process image")
 
                 # add to display queue
-                if (mode[3]):
+                if (self.mode[3]):
                     if(self.display_queue_1):
                         self.display_queue_1.put(self.image_result.copy())
                     if(self.display_queue_2):
                         self.display_queue_2.put(self.current_image.copy())
 
             # display images and handle input
-            if (not mode[3]):
+            if (not self.mode[3]):
                 # update mask
                 if(self.mode[2]):
                     self.updateColorPickerDisplay()
@@ -304,10 +307,14 @@ class FeatureFinder:
         while(key == -1):
             key = -2
             # delay get get input
-            key = cv2.waitKeyEx((int)(self.delay))
+            key = cv2.waitKey((int)(self.delay))
+            if(self.verbose):
+                print(self.name+": pressed key "+str(key))
 
-            # spacebar
+            # if can input
             if not (self.mode[3]):
+
+                # spacebar
                 if (key == 32):
 
                     # add bean
@@ -349,37 +356,41 @@ class FeatureFinder:
                             print(self.name+": could not find dir: "+ self.images_dir)
 
                 # arrow key up
-                if(key == 65362):
+                if(key == 82):
                     if(self.mode[2]):
-                        self.color_picker_range[0] += 5
-                        self.color_picker_range[1] += 5
+                        self.color_picker_range[0] += 2
+                        self.color_picker_range[1] += 2
                         self.updateColorPickerDisplay()
                         print(self.name+": new hsv range for masking "+str(self.color_picker_range_low) +"-"+str(self.color_picker_range_high))
+                        key = -1
 
                 # arror key down
-                if(key == 65364):
+                if(key == 84):
                     if(self.mode[2]):
-                        self.color_picker_range[0] -= 5
-                        self.color_picker_range[1] -= 5
+                        self.color_picker_range[0] -= 2
+                        self.color_picker_range[1] -= 2
                         self.updateColorPickerDisplay()
                         print(self.name+": hsv range for masking "+str(self.color_picker_range_low) +"-"+str(self.color_picker_range_high))
+                        key = -1
 
                 # arror key right
-                if(key == 65363):
+                if(key == 83):
                     if(self.mode[2]):
-                        self.color_picker_range[2] += 10
+                        self.color_picker_range[2] += 5
                         self.updateColorPickerDisplay()
                         print(self.name+": hsv range for masking "+str(self.color_picker_range_low) +"-"+str(self.color_picker_range_high))
+                        key = -1
 
                 # arror key left
-                if(key == 65361):
+                if(key == 81):
                     if(self.mode[2]):
-                        self.color_picker_range[2] -= 10
+                        self.color_picker_range[2] -= 5
                         self.updateColorPickerDisplay()
                         print(self.name+": hsv range for masking "+str(self.color_picker_range_low) +"-"+str(self.color_picker_range_high))
+                        key = -1
 
             # escape
-            if (key == 1048603):
+            if (key == ord('\x1b')):
                 return False
         return True
 
@@ -396,11 +407,12 @@ class FeatureFinder:
 
         # edges
         new_edges_image = self.getImageEdges(img_b_gray, dilation=2, lower=20, upper=50)
+        old_edges_image = self.image_edges.copy()
 
         # get difference
         diff_value = -1
         diff_image = self.base_image_s.copy()
-        if(self.image_edges.shape[0] == self.height and self.image_edges.shape[1] == self.width):
+        if(old_edges_image.shape[0] == self.height and old_edges_image.shape[1] == self.width):
             diff_image = cv2.bitwise_xor(self.image_edges.copy(), new_edges_image.copy())
             diff_value = len((np.where(diff_image == 255))[0])
 
@@ -408,45 +420,22 @@ class FeatureFinder:
         # identify if difference is high
         if(diff_value > 50000 or diff_value == -1 or len(self.identifiedContours) == 0):
             # canny
+
             self.image_edges = new_edges_image.copy()
 
             # fill in holes
             self.image_filled = self.fillWithinEdges(self.image_edges.copy())
 
-            # print / display
-            if(self.verbose):
-                print(self.name +": Difference value = "+str(diff_value))
-                self.displayImage("image_gray", img_b_gray.copy())
-                self.displayImage("image_edges", self.image_edges.copy())
-                self.displayImage("image_filled", self.image_filled.copy())
-                self.displayImage("diff_between_consecutive_images", diff_image, wait=True)
-                cv2.destroyWindow("image_gray")
-                cv2.destroyWindow("image_edges")
-                cv2.destroyWindow("image_filled")
-                cv2.destroyWindow("diff_between_consecutive_images")
-
             # mark beans
             self.identifyFilledImageUsingHsvRanges()
-
         else:
-            # print / display
-            print(self.name +": skipping image")
-            if(self.verbose):
-                print(self.name +": Difference value = "+str(diff_value))
-                self.displayImage("image_gray", img_b_gray.copy())
-                self.displayImage("image_edges", self.image_edges.copy())
-                self.displayImage("image_filled", self.image_filled.copy())
-                self.displayImage("diff_between_consecutive_images", diff_image, wait=True)
-                cv2.destroyWindow("image_gray")
-                cv2.destroyWindow("image_edges")
-                cv2.destroyWindow("image_filled")
-                cv2.destroyWindow("diff_between_consecutive_images")
+            print(self.name+": difference in images to small, skipping...")
 
             # redraw if difference is low
             self.drawIdentifiedContours()
 
     # feature extraction
-    def identifyFilledImageUsingHsvRanges(self):
+    def identifyFilledImageUsingHsvRanges(self, sensitivity=0.00075):
         # data
         self.identifiedContours.clear()
         self.num_of_feature_types = len(self.features)
@@ -513,16 +502,19 @@ class FeatureFinder:
 
             # get the index of the feature
             feature_type = -1
-            for i in range(0, self.num_of_feature_types):
-                if(num_of_pixels[i] == highest_num and num_of_pixels[i] != 0):
-                    feature_type = i
-
-            # setup som print data
-            print_text += "  Contour"+str(counter)+" centroid: ("+str(centroid_x)+","+str(centroid_y)+") "
+            min_num_pixels = (int)((self.height*self.width)* sensitivity)
+            if(highest_num >= min_num_pixels):
+                for i in range(0, self.num_of_feature_types):
+                    if(num_of_pixels[i] == highest_num):
+                        feature_type = i
+            else:
+                verbose_text += "  Contour skipped, is lower than minimum num pixels:" + str(min_num_pixels) + "\n"
 
             # some checks
             if(feature_type == -1):
-                print(print_text + "unidentified")
+                print("  ContourX unidentified")
+                if(self.verbose):
+                    print(verbose_text)
                 continue
 
             # bean data
@@ -533,7 +525,8 @@ class FeatureFinder:
             self.drawIdentifiedContour(counter)
 
             # print text
-            print_text += "identified Object with feature:"+feature_name
+            # setup som print data
+            print_text += "  Contour"+str(counter)+" centroid: ("+str(centroid_x)+","+str(centroid_y)+") identified Object with feature:"+feature_name
             print(print_text)
 
             # verbose display
@@ -568,6 +561,7 @@ class FeatureFinder:
 
         # dilate
         image_edges = cv2.dilate(edges, self.kernel_3x3, iterations = dilation)
+
         return image_edges
 
     def fillWithinEdges(self, edges):
@@ -702,44 +696,52 @@ if (__name__) == "__main__":
                 sys.exit()
 
         if(arg == "threading"):
-            mode[2] = True # multi threading (will disable view from feature finder == no add_Feature and no display and always continous)
+            mode[3] = True # multi threading (will disable view from feature finder == no add_Feature and no display and always continous)
 
         if(arg == "verbose"):
             verbose = True
 
-    # init camera or test image
+    # setup finder
+    bean_finder = FeatureFinder(mode, image_queue, display_queue_1=queue1, display_queue_2=queue2, verbose=verbose, height=test_image.shape[0], width=test_image.shape[1], name="bean finder")
+    finder_thread = threading.Thread(target=bean_finder.run)
+
+    # camera
     capture_thread = None
-    display_q1_thread = None
-    display_q2_thread = None
     camera = None
     converter = None
 
-    # setup camera
+    # alternative display threads
+    display_q1_thread = None
+    display_q2_thread = None
+
+    # start
+    finder_thread.start()
+
+    # start camera
     if(mode[0]):
         camera, converter = initCamera()
         capture_thread = threading.Thread(target=grabImagesThread, args=(camera,converter))
         capture_thread.start()
 
-    # for threading
-    if(mode[2]):
+    # with seprate image queue
+    if(mode[3]):
         display_q1_thread = threading.Thread(target=displayQueueThread, args=("result image",queue1))
         display_q2_thread = threading.Thread(target=displayQueueThread, args=("original image",queue2))
         display_q1_thread.start()
         display_q2_thread.start()
 
-    # create bean finder
-    bean_finder = FeatureFinder(mode, image_queue, display_queue_1=queue1, display_queue_2=queue2, verbose=verbose, height=test_image.shape[0], width=test_image.shape[1], name="bean finder")
-
-    # run
-    bean_finder.run()
 
     #exit
+    finder_thread.join()
     exit_threads = True
-    cv2.destroyAllWindows()
+
     if(camera):
         camera.StopGrabbing()
+
     if(display_q1_thread):
         display_q1_thread.join()
     if(display_q2_thread):
         display_q2_thread.join()
+
+    cv2.destroyAllWindows()
     sys.exit()
