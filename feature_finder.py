@@ -9,7 +9,7 @@ import cv2
 import time
 import sys
 import numpy as np
-import threading
+from threading import Thread, Lock
 import queue
 import re
 import json
@@ -17,12 +17,11 @@ import os
 import glob
 
 ## image sharing ##
-image_queue = queue.Queue()
+image_queue = (Lock(), queue.Queue())
 exit_threads = False
 
 # display queue
-queue1 = queue.Queue()
-queue2 = queue.Queue()
+displayQueue = [None]*2
 q_size = 3
 
 # acqusition
@@ -67,45 +66,26 @@ def grabImagesThread(camera, converter):
         # grab image when queue is not full
         if(image_queue.qsize() < q_size):
             grabResult = camera.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
-
             if grabResult.GrabSucceeded():
                 image = converter.Convert(grabResult)
                 img = image.GetArray()
-                image_queue.put(img)
+                with(image_queue[0]):
+                    image_queue[1].put(img)
             grabResult.Release()
-
+        else:
+            image_queue.join()
     print("camera stopped!!")
-
-def showScaledImage(window_name, image, down_scale=True):
-    rezised_image = image.copy()
-    height, width = rezised_image.shape[0:2]
-    if (down_scale):
-        rezised_image = cv2.resize(rezised_image, ((int)(width/3)+1, (int)(height/3)+1))
-    print("displaying image")
-    cv2.imshow(window_name, rezised_image)
-    cv2.waitKey(33) # take a few seconds before other thread takes over
-
-def displayQueueThread(win_name, queue):
-    while not exit_threads:
-        if not (queue.empty()):
-            display = queue.get(block=True, timeout=None)
-            showScaledImage(win_name, display)
-
-        if(cv2.waitKey(1) == ord('\x1b')):
-            cv2.destroyWindow(win_name)
-            break
-
 
 ## find ellipse like objects using hsv colors ##
 class FeatureFinder:
     # main routine functions
-    def __init__(self, mode, image_queue, display_queue_1=None, display_queue_2=None, height=1554, width=2074, name="feature_finder", verbose=False, max_contours=50):
+    def __init__(self, mode, image_queue, result_image_queue=(Lock(), queue.Queue), extra_image_queue=(Lock(), queue.Queue), height=1554, width=2074, name="feature_finder", verbose=False, max_contours=50):
         # setup
         self.name = name
         self.mode = mode
         self.image_queue = image_queue
-        self.display_queue_1 = display_queue_1
-        self.display_queue_2 = display_queue_2
+        self.result_image_queue = result_image_queue
+        self.original_image_queue = extra_image_queue
         self.verbose = verbose
 
         #paths
@@ -161,8 +141,6 @@ class FeatureFinder:
         print(self.name+": succesfully loaded features")
         verbose_text += self.name+":Features:"+str(self.features) + "\n"
 
-
-
         # contious
         if(self.mode[0]):
             self.delay = 1 # 1 ms
@@ -204,8 +182,8 @@ class FeatureFinder:
             print_text += self.name+" input list:\n"
             if (self.mode[2]):
                 print_text += "  : click on a pixel on window 'HSV_color_picker' to create a hsv image mask\n"
-                print_text += "  : use arrow keys left and right to change hsv range Value for the mask"
-                print_text += "  : use arrow keys up and down to change hsv ranges HUE and Saturation for the mask"
+                print_text += "  : use <arrow keys left and right> to change hsv range Value for the mask\n"
+                print_text += "  : use <arrow keys up and down> to change hsv ranges HUE and Saturation for the mask\n"
                 print_text += "  : press <spacebar> to add ranges feature\n"
 
             if (self.mode[0] and not self.mode[1] and not self.mode[2]):
@@ -215,14 +193,14 @@ class FeatureFinder:
 
             if(self.delay == 0):
                 print_text += "  : press any other key to continue to next image\n"
-        else:
-            if not (display_queue_1):
-                print(self.name+" no display queue for resulting images!!")
-            if not (display_queue_2):
-                print(self.name+" no display queue for original images!!")
-            verbose = False
 
         # print info
+        if(self.mode[3]):
+            if not (self.result_image_queue):
+                print(self.name+": no result image queue given\n")
+            if not (self.original_image_queue):
+                print(self.name+": no extra output queue image given\n")
+
         verbose_text += self.name+": set delay to "+ str(self.delay) + "\n"
         if(self.verbose):
             print(verbose_text)
@@ -238,9 +216,10 @@ class FeatureFinder:
         # process images
         while(True):
             # get and edit image
-            if not (self.image_queue.empty()):
+            if not (self.image_queue[1].empty()):
                 # get image and set data
-                self.current_image = self.image_queue.get(block=True, timeout=None)
+                with(self.image_queue[0]):
+                    self.current_image = self.image_queue[1].get(block=True, timeout=None)
 
                 # set values if image sizes are differrent
                 if(self.current_image.shape[0] != self.height or self.current_image.shape[1] != self.width):
@@ -268,10 +247,16 @@ class FeatureFinder:
 
                 # add to display queue
                 if (self.mode[3]):
-                    if(self.display_queue_1):
-                        self.display_queue_1.put(self.image_result.copy())
-                    if(self.display_queue_2):
-                        self.display_queue_2.put(self.current_image.copy())
+                    if(self.result_image_queue[0] and self.result_image_queue[1]):
+                        with(self.result_image_queue[0]):
+                            self.result_image_queue[1].put(item=self.image_result.copy(), block=True, timeout=None)
+                    if(self.original_image_queue[0] and self.original_image_queue[1]):
+                        with(self.original_image_queue[0]):
+                            self.original_image_queue[1].put(item=self.current_image.copy(), block=True, timeout=None)
+
+                # tell que image is gotten
+                with(self.image_queue[0]):
+                    self.image_queue[1].task_done()
 
             # display images and handle input
             if (not self.mode[3]):
@@ -285,10 +270,10 @@ class FeatureFinder:
                 # always display original image
                 self.displayImage("original", self.current_image.copy())
 
-                # handle input / delay / read keys
-                if not (self.handleInput()):
-                    print(self.name+": exiting..")
-                    return
+            # handle input / delay / read keys
+            if not (self.handleInput()):
+                print(self.name+": exiting..")
+                return
 
     def updateColorPickerDisplay(self):
         self.image_hsv = cv2.cvtColor(self.current_image.copy(),cv2.COLOR_BGR2HSV)
@@ -303,13 +288,15 @@ class FeatureFinder:
     def handleInput(self):
         key = -1
 
+        # exit window for mode[3]
+        if(self.mode[3]):
+            self.displayImage(self.name+"_exit_window", np.zeros((100,100,1), np.uint8), down_scale=False)
+
         # repeat for next keys
         while(key == -1):
             key = -2
             # delay get get input
             key = cv2.waitKey((int)(self.delay))
-            if(self.verbose):
-                print(self.name+": pressed key "+str(key))
 
             # if can input
             if not (self.mode[3]):
@@ -420,16 +407,25 @@ class FeatureFinder:
         # identify if difference is high
         if(diff_value > 50000 or diff_value == -1 or len(self.identifiedContours) == 0):
             # canny
-
             self.image_edges = new_edges_image.copy()
 
             # fill in holes
             self.image_filled = self.fillWithinEdges(self.image_edges.copy())
 
+            # display extra text and display
+            if(verbose):
+                print(self.name+": difference value between image:"+str(diff_value))
+                self.displayImage("image_edges", self.image_edges)
+                self.displayImage("image_filled", self.image_filled, wait=True, kill=True)
+                cv2.destroyWindow("image_edges")
+
             # mark beans
             self.identifyFilledImageUsingHsvRanges()
+
         else:
-            print(self.name+": difference in images to small, skipping...")
+            if(verbose):
+                print(self.name+": difference between images to small!! value: "+str(diff_value))
+                print(self.name+": redrawing contours..")
 
             # redraw if difference is low
             self.drawIdentifiedContours()
@@ -532,14 +528,11 @@ class FeatureFinder:
             # verbose display
             if(self.verbose):
                 print(verbose_text)
-                self.displayImage("resulting_countours_image", self.image_result.copy())
-                self.displayImage("contour area image", countour_area_image)
+                combined_image_1 = np.vstack((cv2.cvtColor(countour_area_image.copy(), cv2.COLOR_GRAY2BGR), self.image_result.copy()))
                 for i in range(0, self.num_of_feature_types):
-                    self.displayImage("mask_"+self.features[i][0], hsv_image_masks[i])
-                    if not (self.displayImage("result bitwise_and", res_images[i], wait=True, kill=True)):
-                        cv2.destroyWindow("mask_"+self.features[i][0])
+                    combined_image_2 = np.vstack((hsv_image_masks[i].copy(), res_images[i].copy()))
+                    if not (self.displayImage("result bitwise_and", np.hstack((cv2.cvtColor(combined_image_2.copy(), cv2.COLOR_GRAY2BGR), combined_image_1.copy())), wait=True, kill=True)):
                         break
-                    cv2.destroyWindow("mask_"+self.features[i][0])
                 cv2.destroyWindow("resulting_countours_image")
                 cv2.destroyWindow("contour area image")
             counter+=1
@@ -589,8 +582,11 @@ class FeatureFinder:
     # visualisation
     def displayImage(self, window_name, image, down_scale=True, wait=False, escape_key=ord('\x1b'),kill=False):
         rezised_image = image.copy()
+        h = self.display_height
+        w = self.display_width
+
         if(down_scale):
-            rezised_image = cv2.resize(rezised_image, (self.display_width, self.display_height))
+            rezised_image = cv2.resize(rezised_image, (w, h))
         cv2.imshow(window_name, rezised_image)
 
         if(wait):
@@ -632,17 +628,27 @@ class FeatureFinder:
         cv2.drawContours(self.image_result, [cnt], 0, (0,255,0), 3)
         self.image_result = self.writeTextOnImage(self.image_result, self.identifiedContours[i][0], centroid_x, centroid_y, font_rgb_color=(0,0,255))
 
+
+def showScaledImage(window_name, image, down_scale=True, down_scale_value=3):
+    rezised_image = image.copy()
+    height, width = rezised_image.shape[0:2]
+    if (down_scale):
+        rezised_image = cv2.resize(rezised_image, ((int)(width/down_scale_value)+1, (int)(height/down_scale_value)+1))
+    cv2.imshow(window_name, rezised_image)
+
 #  main
 if (__name__) == "__main__":
-
-    # default vals
+    # camera
+    capture_thread = None
     camera = None
     converter = None
 
-    # read args
-    test_image = cv2.imread((os.getcwd()+'/images/image1.bmp'), -1)
-    mode = [False, False, False, False] # mode[0] = single_view(False) or continous_view(True)  # mode[1] = view_image(False) or process image(True) # mode[2]  = view only(False) or add_feature(True)
+    # settings for finder
+    # mode[0] = single_view(False) or continous_view(True)  # mode[1] = view_image(False) or process image(True) # mode[2]  = view only(False) or add_feature(True) # mode[3] display(False) or performance mode (no display)(True)
+    mode = [False, False, False, False]
     verbose = False
+
+    # read args
     for arg in sys.argv:
         if((arg == "h" or arg == "help") and len(sys.argv) == 2):
             print("running from ws:" + str(os.getcwd()))
@@ -653,7 +659,8 @@ if (__name__) == "__main__":
             help_str += "with_images : read directory: /images/\n\n"
             help_str += "add_feature : add feature from hsv range to /features.json (loads on start)\n"
             help_str += "find_features: find features on given image using features defined in file /features.json\n\n"
-            help_str += "verbose : print and display more images, for debugging\n"
+            help_str += "verbose : print and display more images in between processing, for debugging\n\n"
+            help_str += "result_to_queue: output results into seperate queue, will disable all display for the finder\n"
             print(help_str)
             sys.exit()
 
@@ -671,7 +678,8 @@ if (__name__) == "__main__":
             img_pth = (os.getcwd()+'/images/'+input())
             if(os.path.exists(img_pth)):
                 test_image = cv2.imread(img_pth, -1)
-                image_queue.put(test_image)
+                with(image_queue[0]):
+                    image_queue.put(test_image)
             else:
                 print("could not find image"+img_pth)
                 print("exiting")
@@ -683,9 +691,10 @@ if (__name__) == "__main__":
                 image_paths = glob.glob(img_pth+"*.bmp")
                 if(len(image_paths) > 0):
                     test_image = cv2.imread(image_paths[0], -1)
-                    for pth in image_paths:
-                        image_queue.put(cv2.imread(pth, -1))
-                        print("loaded image:"+pth)
+                    with(image_queue[0]):
+                        for pth in image_paths:
+                            image_queue[1].put(cv2.imread(pth, -1))
+                            print("loaded image:"+pth)
                 else:
                     print("no image was found in "+ img_pth)
                     print("exiting")
@@ -695,53 +704,49 @@ if (__name__) == "__main__":
                 print("exiting")
                 sys.exit()
 
-        if(arg == "threading"):
+        if(arg == "result_to_queue"):
             mode[3] = True # multi threading (will disable view from feature finder == no add_Feature and no display and always continous)
 
         if(arg == "verbose"):
             verbose = True
 
-    # setup finder
-    bean_finder = FeatureFinder(mode, image_queue, display_queue_1=queue1, display_queue_2=queue2, verbose=verbose, height=test_image.shape[0], width=test_image.shape[1], name="bean finder")
-    finder_thread = threading.Thread(target=bean_finder.run)
-
-    # camera
-    capture_thread = None
-    camera = None
-    converter = None
-
-    # alternative display threads
-    display_q1_thread = None
-    display_q2_thread = None
-
-    # start
-    finder_thread.start()
-
     # start camera
     if(mode[0]):
         camera, converter = initCamera()
-        capture_thread = threading.Thread(target=grabImagesThread, args=(camera,converter))
+        capture_thread = Thread(target=grabImagesThread, args=(camera,converter))
         capture_thread.start()
 
-    # with seprate image queue
+    # setup finder and start finder
+    bean_finder = FeatureFinder(mode, image_queue, verbose=verbose, name="bean_finder_1")
+    finder_thread = Thread(target=bean_finder.run)
+    finder_thread.start()
+
+    # if no_display use extra finder
     if(mode[3]):
-        display_q1_thread = threading.Thread(target=displayQueueThread, args=("result image",queue1))
-        display_q2_thread = threading.Thread(target=displayQueueThread, args=("original image",queue2))
-        display_q1_thread.start()
-        display_q2_thread.start()
+        bean_finder_2 = FeatureFinder([True, False, False, True], image_queue, name=" bean_finder_2")
+        finder_thread_2 = Thread(target=bean_finder_2.run)
+        finder_thread_2.start()
 
-
-    #exit
+    # join
     finder_thread.join()
-    exit_threads = True
+    if(mode[3]):
+        finder_thread_2.join()
 
+    # force stop
+    exit_threads = True
     if(camera):
         camera.StopGrabbing()
 
-    if(display_q1_thread):
-        display_q1_thread.join()
-    if(display_q2_thread):
-        display_q2_thread.join()
-
+    # display queues
+    # cur_img = None
+    # while(bean_finder.result_image_queue[1].qsize() > 0):
+    #    with(bean_finder.result_image_queue[0]):
+    #        cur_img = bean_finder.result_image_queue[1].get(block=True, timeout=1)
+    #    showScaledImage("window", cur_img.copy())
+    #    if(cv2.waitKey(33) == ord('\x1b')):
+    #        break
+    #    if(bean_finder.result_image_queue[1].empty()):
+    #        break
+    # exit
     cv2.destroyAllWindows()
     sys.exit()
