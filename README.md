@@ -26,9 +26,12 @@ features:
 11. only requires image queue
 12. can change image dimensions runtime
 13. track difference between images and prevent unneeded processing
+14. hsv color slider with arrow keys
 
 
 Todo:
  
-1. fix threading
+1. fix threading (output queues not working in no display mode])
 2. add watershed to separate colling beans
+3. test with actual camera
+4. save output to file
