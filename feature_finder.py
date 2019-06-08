@@ -1,7 +1,7 @@
 # author:
 # Johan Mgina
-# Date modified: 8-6-2019
-# version: 0.9.6
+# Date modified: 9-6-2019
+# version: 0.9.8.5
 # Todo next: watershed for overlapping beans, relative directories and also arguments
 
 from pypylon import pylon
