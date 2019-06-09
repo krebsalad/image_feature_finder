@@ -31,7 +31,7 @@ features:
 
 Todo:
  
-1. fix threading (output queues not working in no display mode])
-2. add watershed to separate colling beans
-3. test with actual camera
-4. save output to file
+1. add watershed to separate colling beans
+2. test with actual camera
+3. save output to file
+4. use queues instead of lists
