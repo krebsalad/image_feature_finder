@@ -27,6 +27,7 @@ features:
 12. can change image dimensions runtime
 13. track difference between images and prevent unneeded processing
 14. hsv color slider with arrow keys
+15. multithreading mode (nodisplay, seperate lists using locks)
 
 
 Todo:
