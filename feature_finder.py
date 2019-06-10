@@ -1,6 +1,6 @@
 # author:
 # Johan Mgina
-# Date modified: 9-6-2019a
+# Date modified: 10-6-2019
 # version: 0.9.9
 # Todo next: watershed for overlapping beans
 
@@ -16,93 +16,78 @@ import json
 import os
 import glob
 
-## image sharing ##
-image_queue = queue.Queue()
-img_q_size = 3
+# global
+global exit_threads
 exit_threads = False
 
+## image buffer class
+class SequentialImageBuffer:
+    def __init__(self, name="image_buffer"):
+        # data
+        self.seq_image_list = []        # data saved in tuples (sq_nr, image)
+        self.image_list_loc = Lock()
+        self.name = name
 
-def initCamera():
-    # conecting to the first available camera
-    camera = pylon.InstantCamera(pylon.TlFactory.GetInstance().CreateFirstDevice())
+    # thread safe
+    def putLast(self, seq_image, timeout=-1, retry_later = [False, 100, 0.5]):
+        # make sure it is a tuple with a sequence number
+        if not seq_image:
+            return False
+        if not (len(seq_image) == 2):
+            return False
+        if(seq_image[0] == -1):
+            return False
 
-    #set the dimentions og the image to grab
-    camera.Open()
-    camera.Width.Value = camera_w  # 0.8% max width of Basler puA2500-14uc camera
-    camera.Height.Value =  camera_h# 0.8% max height of Basler puA2500-14uc camera
-    camera.OffsetX.Value = 518
-    # camera.AcquisitionFrameRate.SetValue(14)
+        # unlock
+        unlocked = self.image_list_loc.acquire(timeout=timeout)
 
-    # set features of camera
-    camera.ExposureTime.Value = 110000
-    camera.ExposureAuto.SetValue('Off')
-    camera.BalanceWhiteAuto.SetValue('Off')
-    camera.LightSourcePreset.SetValue('Tungsten2800K')
-    camera.GainAuto.SetValue('Off')
-    # pylon.FeaturePersistence.Save("test.txt", camera.GetNodeMap())
+        # append image
+        if(unlocked):
+            self.seq_image_list.append(seq_image)
+            self.image_list_loc.release()
 
-    print("Using device: ", camera.GetDeviceInfo().GetModelName())
-    print("width set: ",camera.Width.Value)
-    print("Height set: ",camera.Height.Value)
+        return unlocked
 
-    # The parameter MaxNumBuffer can be used to control the count of buffers
-    # allocated for grabbing. The default value of this parameter is 10.
-    camera.MaxNumBuffer = 5
+    # thread safe
+    def getFirst(self, timeout=-1):
+        unlocked = self.image_list_loc.acquire(timeout=timeout)
+        seq_image = (-1, None)
+        if(unlocked):
+            if(len(self.seq_image_list) > 0):
+                seq_image = self.seq_image_list.pop(0)
+            else:
+                unlocked = False
+            self.image_list_loc.release()
 
-    # Grabing Continusely (video) with minimal delay
-    camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
-    converter = pylon.ImageFormatConverter()
+        return unlocked, seq_image
 
-    # converting to opencv bgr format
-    converter.OutputPixelFormat = pylon.PixelType_BGR8packed
-    converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
-    return camera, converter
+    # thread safe
+    def getImageUsingSeqNr(self, seq_nr, timeout=33):
+        unlocked = self.image_list_loc.acquire(timeout=timeout)
+        seq_image = (-1, None)
+        if(unlocked):
+            for i, seq_img in enumerate(self.seq_image_list):
+                if(seq_img[0] == seq_nr):
+                    seq_image = self.seq_image_list.pop(i)
+                    break
+            self.image_list_loc.release()
+            if(seq_image[0] == -1):
+                unlocked = False
+        return unlocked, seq_image
 
-# acqusition (Threads)
-def grabImagesThread(camera, converter):
-    while camera.IsGrabbing() and not exit_threads:
-        # grab image when queue is not full
-        if(image_queue.qsize() < img_q_size):
-            grabResult = camera.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
-            if grabResult.GrabSucceeded():
-                image = converter.Convert(grabResult)
-                img = image.GetArray()
-                image_queue.put(img)
-            grabResult.Release()
-        else:
-            image_queue.join()
-    print("camera stopped!!")
+    # thread safe
+    def getLength(self, timeout=-1):
+        unlocked = self.image_list_loc.acquire(timeout=timeout)
+        length = -1
+        if(unlocked):
+            length = len(self.seq_image_list)
+            self.image_list_loc.release()
+        return unlocked, length
 
-def displayImagesFromBuffers(buffers, name, wait_time=20, down_scale=True, down_scale_value=3):
-    len_buffers = len(buffers)
-    cur_image = [np.zeros((100, 100, 1), np.uint8)] * len_buffers
-    while not (exit_threads):
-        # get images
-        for i in range(0, len_buffers):
-            is_new_image = False
-            # lock and pop image
-            with(buffers[i][0]):
-                if(len(buffers[i][1]) > 0):
-                    cur_image[i] = buffers[i][1].pop(0)
-                    is_new_image = True
-
-            # check if required to scale image
-            if(is_new_image and down_scale):
-                height, width = cur_image[i].shape[0:2]
-                cur_image[i] = cv2.resize(cur_image[i], ((int)(width/down_scale_value)+1, (int)(height/down_scale_value)+1))
-
-        # show images
-        for i in range(0, len_buffers):
-            cv2.imshow(name+str(i), cur_image[i])
-
-        if(cv2.waitKey(wait_time) == ord('\x1b')):
-            cv2.destroyWindow(name)
-            break
-
-## find ellipse like objects using hsv colors ##
+## find ellipse like objects using hsv colors
 class FeatureFinder:
     # main routine functions
-    def __init__(self, mode, image_queue, result_image_buffer=(Lock(),[]), original_image_buffer=(Lock(),[]),height=1554, width=2074, name="feature_finder", verbose=False, max_contours=50):
+    def __init__(self, mode, in_image_buffer=SequentialImageBuffer("in_image_buffer"), result_image_buffer=SequentialImageBuffer("result_images"), original_image_buffer=SequentialImageBuffer("original_images"), height=1554, width=2074, name="feature_finder", verbose=False, max_contours=50, sleep_time_sec=0.100):
         # possibility to use lists and locks from outside
         self.public_self = self
 
@@ -110,11 +95,10 @@ class FeatureFinder:
         self.stop = True
         self.name = name
         self.mode = mode
-        self.image_queue = image_queue
-        self.res_loc, self.res_list = result_image_buffer
-        self.result_image_buffer = (self.res_loc, self.res_list)
-        self.origin_loc, self.origin_list = original_image_buffer
-        self.original_image_buffer = (self.origin_loc, self.origin_list)
+        self.in_image_buffer = in_image_buffer
+        self.result_image_buffer = result_image_buffer
+        self.original_image_buffer = original_image_buffer
+        self.sleep_time = sleep_time_sec
         self.verbose = verbose
 
         #paths
@@ -179,7 +163,7 @@ class FeatureFinder:
 
             # contious
             if(self.mode[0]):
-                self.delay = 1 # 1 ms
+                self.delay = 50 # 1 ms
 
             # pick a color from a hsv image and create mask
             if(self.mode[2]):
@@ -202,11 +186,11 @@ class FeatureFinder:
 
             # make image when running camera
             if(self.mode[0] and not self.mode[1] and not self.mode[2]):
-                self.delay = 1 # 1 ms
+                self.delay = 16 # about 60 fps
 
             # pick_color mode when running camera
             if(self.mode[0] and self.mode[2]):
-                self.delay = 1000 # 1 s
+                self.delay = 1000 # 1 fps
 
             # print input
             print_text += self.name+" input list:\n"
@@ -224,14 +208,6 @@ class FeatureFinder:
             if(self.delay == 0):
                 print_text += "  : press any other key to continue to next image\n"
 
-        # print info and set delay
-        if(self.mode[3]):
-            if not (self.result_image_buffer):
-                print(self.name+": no result image queue given\n")
-            if not (self.original_image_buffer):
-                print(self.name+": no extra output queue image given\n")
-            self.delay = 1 # 1 ms
-
         verbose_text += self.name+": set delay to "+ str(self.delay) + "\n"
         if(self.verbose):
             print(verbose_text)
@@ -247,10 +223,13 @@ class FeatureFinder:
 
         # process images
         while not (self.stop):
-            # get and edit image
-            if not (self.image_queue.empty()):
+            # get image
+            is_new_image, seq_image = self.in_image_buffer.getFirst(timeout=33)
+
+            if(is_new_image):
                 # get image and set data
-                self.current_image = self.image_queue.get(block=True, timeout=33)
+                seq_nr, image = seq_image
+                self.current_image = image.copy()
 
                 # set values if image sizes are differrent
                 if(self.current_image.shape[0] != self.height or self.current_image.shape[1] != self.width):
@@ -276,14 +255,15 @@ class FeatureFinder:
                     self.time_between_images = (tick_end - tick_start)/ cv2.getTickFrequency()
                     print(self.name+": took "+str(self.time_between_images)+" to process image")
 
-                # add to display queue
-                with(self.result_image_buffer[0]):
-                        self.result_image_buffer[1].append(self.image_result.copy())
-                with(self.original_image_buffer[0]):
-                        self.original_image_buffer[1].append(self.current_image.copy())
-
-                # tell que image is gotten
-                self.image_queue.task_done()
+                # add to out buffers
+                if (self.mode[3]):
+                    if (self.result_image_buffer.putLast(seq_image=(seq_nr, self.image_result.copy()))):
+                        print(self.name+": appended img result "+str(seq_nr)+" to result buffer")
+                    if(self.original_image_buffer.putLast(seq_image=(seq_nr, self.current_image.copy()))):
+                        print(self.name+": appended img origin "+str(seq_nr)+" to origin buffer")
+                else:
+                    if(self.mode[3]):
+                        time.sleep(self.sleep_time) # give other threads some time
 
             # display images and handle input
             if (not self.mode[3]):
@@ -297,10 +277,10 @@ class FeatureFinder:
                 # always display original image
                 self.displayImage("original", self.current_image.copy())
 
-            # handle input / delay / read keys
-            if not (self.handleInput()):
-                print(self.name+": exiting..")
-                return
+                # handle input / delay / read keys
+                if not (self.handleInput()):
+                    print(self.name+": exiting..")
+                    return
 
     def updateColorPickerDisplay(self):
         self.image_hsv = cv2.cvtColor(self.current_image.copy(),cv2.COLOR_BGR2HSV)
@@ -536,7 +516,7 @@ class FeatureFinder:
 
             # double checks
             if(feature_type == -1):
-                verbose_text += "  Contour skipped, is lower than minimum num pixels:" + str(min_num_pixels) + "\n\n"
+                verbose_text += " - Contour skipped, is lower than minimum num pixels:" + str(min_num_pixels) + "\n\n"
                 continue
 
             # bean data
@@ -546,8 +526,8 @@ class FeatureFinder:
             # draw contour
             self.drawIdentifiedContour(counter)
 
-            # setup som print data
-            txt = "  Contour"+str(counter)+" centroid: ("+str(centroid_x)+","+str(centroid_y)+") identified Object with feature:"+feature_name+"\n"
+            # setup some print data
+            txt = "  - Contour"+str(counter)+" center:("+str(centroid_x)+","+str(centroid_y)+") Hsv Feature:"+feature_name+"\n"
             print_text += txt
             verbose_text += txt
 
@@ -658,34 +638,162 @@ class FeatureFinder:
         cv2.drawContours(self.image_result, [cnt], 0, (0,255,0), 3)
         self.image_result = self.writeTextOnImage(self.image_result, self.identifiedContours[i][0], centroid_x, centroid_y, font_rgb_color=(0,0,255))
 
+# acqusition (Threads)
+def initCamera():
+    # conecting to the first available camera
+    camera = pylon.InstantCamera(pylon.TlFactory.GetInstance().CreateFirstDevice())
+
+    #set the dimentions og the image to grab
+    camera.Open()
+    camera.Width.Value = camera_w  # 0.8% max width of Basler puA2500-14uc camera
+    camera.Height.Value =  camera_h# 0.8% max height of Basler puA2500-14uc camera
+    camera.OffsetX.Value = 518
+    # camera.AcquisitionFrameRate.SetValue(14)
+
+    # set features of camera
+    camera.ExposureTime.Value = 110000
+    camera.ExposureAuto.SetValue('Off')
+    camera.BalanceWhiteAuto.SetValue('Off')
+    camera.LightSourcePreset.SetValue('Tungsten2800K')
+    camera.GainAuto.SetValue('Off')
+    # pylon.FeaturePersistence.Save("test.txt", camera.GetNodeMap())
+
+    print("Using device: ", camera.GetDeviceInfo().GetModelName())
+    print("width set: ",camera.Width.Value)
+    print("Height set: ",camera.Height.Value)
+
+    # The parameter MaxNumBuffer can be used to control the count of buffers
+    # allocated for grabbing. The default value of this parameter is 10.
+    camera.MaxNumBuffer = 5
+
+    # Grabing Continusely (video) with minimal delay
+    camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+    converter = pylon.ImageFormatConverter()
+
+    # converting to opencv bgr format
+    converter.OutputPixelFormat = pylon.PixelType_BGR8packed
+    converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
+    return camera, converter
+
+def grabImagesThread(camera, converter, image_buffer):
+    global exit_threads
+    img_counter = 0
+    while camera.IsGrabbing() and not exit_threads:
+
+        # check if list is not full
+        is_len, length = iamge_buffer.getLength(timeout=1000)
+        if(is_len):
+            if(length < img_q_size):
+
+                # grab image
+                grabResult = camera.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
+                if grabResult.GrabSucceeded():
+                    image = converter.Convert(grabResult)
+                    img = image.GetArray()
+                    image_buffer.putLast((img_counter, img))
+                    img_counter += 1
+                grabResult.Release()
+
+    print("camera stopped!!")
+
+def displayBuffer(buffers_in, start_sq_nr=0, frame_time_sec=1, exit_key=ord('\x1b')):
+    # show next image if time passed
+    displayed_images_counter = start_sq_nr
+    len_buffers = len(buffers_in)
+    tick_start = cv2.getTickCount()
+    to_display_images = [None]*len_buffers
+    task_done = [False]*len_buffers
+    while not exit_threads:
+        done = True
+        for i, buffer_in in enumerate(buffers_in):
+            if not task_done[i]:
+                is_img, image = buffer_in.getImageUsingSeqNr(displayed_images_counter, timeout=33)
+                if is_img:
+                    # resize
+                    h, w = image[1].shape[0:2]
+                    resized_img = cv2.resize(image[1], ((int)(w/3)+1,(int)(h/3)+1))
+                    to_display_images[i] = resized_img
+                    task_done[i] = True
+                else:
+                    done = False
+
+            # exit thread
+            if(cv2.waitKey(1) == exit_key):
+                return
+
+        if(done):
+            # timer, sleep for time left between frames
+            tick_end = cv2.getTickCount()
+            time_took = (tick_end - tick_start)/ cv2.getTickFrequency()
+            sleep_time = (frame_time_sec - time_took)
+            if(sleep_time > 0):
+                time.sleep(sleep_time)
+            tick_start = cv2.getTickCount()
+
+            # if all images are gotten
+            for i, buffer_in in enumerate(buffers_in):
+                # show
+                cv2.imshow(buffer_in.name+"_window", to_display_images[i])
+                print("display_"+buffer_in.name+": displayed image"+str(displayed_images_counter))
+
+                # exit thread
+                if(cv2.waitKey(1) == exit_key):
+                    return
+
+            # next
+            displayed_images_counter +=1
+            to_display_images = [None]*len_buffers
+            task_done = [False]*len_buffers
+
+        # exit thread
+        if(cv2.waitKey(1) == exit_key):
+            return
+
+
+def printHelp():
+    print("running from ws:" + str(os.getcwd()))
+    help_str = "This is a tool to find ellipse like objects with color on an image with a white background\n"
+    help_str += "Options:\n\n"
+    help_str += "with_image : (prompt) will ask for image in /images/\n"
+    help_str += "with_camera : run contiounsly with camera\n"
+    help_str += "with_images : read directory: /images/\n\n"
+    help_str += "add_feature : add feature from hsv range to /features.json (loads on start)\n"
+    help_str += "find_features: find features on given image using features defined in file /features.json\n\n"
+    help_str += "verbose : print and display more images in between processing, for debugging\n\n"
+    help_str += "result_to_queue: output results into combined buffer, will use a seprate thread to display images\n"
+    print(help_str)
+
 #  main
 if (__name__) == "__main__":
-    # camera
-    capture_thread = None
-    camera = None
-    converter = None
-    result_image_buffer = (Lock(), [])
-    original_image_buffer = (Lock(), [])
+    ###################
+    ## image buffers ##
+    image_buffer = SequentialImageBuffer("raw_images")
+    result_image_buffer = SequentialImageBuffer("result_images")
+    original_image_buffer =  SequentialImageBuffer("original_images")
+    sec_per_frame = 1    # for display 1 fps
+    ####################
 
-    # settings for finder
-    # mode[0] = single_view(False) or continous_view(True)  # mode[1] = view_image(False) or process image(True) # mode[2]  = view only(False) or add_feature(True) # mode[3] display(False) or performance mode (no display)(True)
+
+    ###########################
+    ## Setup finder settings ##
     mode = [False, False, False, False]
     verbose = False
+    # mode[0] = single_view(False) or continous_view(True)
+    # mode[1] = view_image(False) or process image(True)
+    # mode[2]  = view only(False) or add_feature(True)
+    # mode[3] = use_display(False) or use_queues/no_display(True)
+    # verbose = use display for debugging and extra info, only if display allowed
 
-    # read args
+    # print help
+    if(len(sys.argv) == 1):
+        printHelp()
+        sys.exit()
+
+    # read args and images
+    img_counter = 0
     for arg in sys.argv:
-        if((arg == "h" or arg == "help") and len(sys.argv) == 2):
-            print("running from ws:" + str(os.getcwd()))
-            help_str = "default : will try to read image: /images/image1.bmp\n"
-            help_str += "Options:\n\n"
-            help_str += "with_image : (prompt) will ask for image in /images/\n"
-            help_str += "with_camera : run contiounsly with camera\n"
-            help_str += "with_images : read directory: /images/\n\n"
-            help_str += "add_feature : add feature from hsv range to /features.json (loads on start)\n"
-            help_str += "find_features: find features on given image using features defined in file /features.json\n\n"
-            help_str += "verbose : print and display more images in between processing, for debugging\n\n"
-            help_str += "result_to_queue: output results into combined buffer, will use a seprate thread to display images\n"
-            print(help_str)
+        if((arg == "h" or arg == "help" or arg == "-h") and len(sys.argv) == 2):
+            printHelp()
             sys.exit()
 
         if(arg == "with_camera"):
@@ -701,8 +809,8 @@ if (__name__) == "__main__":
             print("test image name from images file:")
             img_pth = (os.getcwd()+'/images/'+input())
             if(os.path.exists(img_pth)):
-                test_image = cv2.imread(img_pth, -1)
-                image_queue.put(test_image)
+                image_buffer.putLast((img_counter, cv2.imread(img_pth, -1)))
+                img_counter+=1
             else:
                 print("could not find image"+img_pth)
                 print("exiting")
@@ -713,9 +821,9 @@ if (__name__) == "__main__":
             if(os.path.isdir(img_pth)):
                 image_paths = glob.glob(img_pth+"*.bmp")
                 if(len(image_paths) > 0):
-                    test_image = cv2.imread(image_paths[0], -1)
                     for pth in image_paths:
-                        image_queue.put(cv2.imread(pth, -1))
+                        image_buffer.putLast((img_counter,cv2.imread(pth, -1)))
+                        img_counter+=1
                         print("loaded image:"+pth)
                 else:
                     print("no image was found in "+ img_pth)
@@ -731,54 +839,71 @@ if (__name__) == "__main__":
 
         if(arg == "verbose"):
             verbose = True
+    ############################
 
-    # start camera
+
+    ###################
+    ## MAIN PROGRAM ##
+    # start camera if needed
+    capture_thread = None
+    camera = None
+    converter = None
     if(mode[0]):
+        sec_per_frame = 0.20
         camera, converter = initCamera()
         capture_thread = Thread(target=grabImagesThread, args=(camera,converter))
         capture_thread.start()
 
     # setup finder and start finder
-    bean_finder = FeatureFinder(mode, image_queue, result_image_buffer=result_image_buffer, original_image_buffer=original_image_buffer, name="bean_finder_1", verbose=verbose)
+    bean_finder = FeatureFinder(mode, image_buffer, result_image_buffer=result_image_buffer, original_image_buffer=original_image_buffer, name="bean_finder_1", verbose=verbose)
     finder_thread = Thread(target=bean_finder.run)
     finder_thread.start()
+    ################
 
-    # setup theads for displaying
-    display_thread = None
-    display_thread_2 = None
 
-    # if no_display use extra finder and a display thread
+    ############################
+    ## Extra features mode[3] ##
+    # using multiple threads
     if(mode[3]):
+        bean_finder_2 = None
+        finder_thread_2 = None
+        bean_finder_3 = None
+        finder_thread_3 = None
+
+        # setup theads for displaying in case of extra finders
+        display_thread = None
+        display_thread_2 = None
+
         # extra processing thread
-        bean_finder_2 = FeatureFinder([True, True, False, True], image_queue, result_image_buffer=result_image_buffer, original_image_buffer=original_image_buffer, name="bean_finder_2")
+        bean_finder_2 = FeatureFinder([True, True, False, True], image_buffer, result_image_buffer=result_image_buffer, original_image_buffer=original_image_buffer, name="bean_finder_2")
         finder_thread_2 = Thread(target=bean_finder_2.run)
         finder_thread_2.start()
+        bean_finder_3 = FeatureFinder([True, True, False, True], image_buffer, result_image_buffer=result_image_buffer, original_image_buffer=original_image_buffer, name="bean_finder_3")
+        finder_thread_3 = Thread(target=bean_finder_3.run)
+        finder_thread_3.start()
 
-        # display buffers
+        # display
         buffers = [result_image_buffer, original_image_buffer]
+        displayBuffer(buffers,start_sq_nr=0, frame_time_sec=sec_per_frame, exit_key=ord('\x1b'))
 
-        # display thread (single required with regards to open cv)
-        display_thread = Thread(target=displayImagesFromBuffers, args=(buffers,"results",1000,True,3))
-        display_thread.start()
-
-
-    # join the threads
-    if(mode[3]):
-        display_thread.join()
+        # join the threads
         exit_threads = True
         bean_finder.stop = True
         bean_finder_2.stop = True
+        bean_finder_3.stop = True
         print("trying to exit threads")
 
-    finder_thread.join()
-    if(mode[3]):
         finder_thread_2.join()
-    print("exited threads succesfully")
+        finder_thread_3.join()
+    ############################
 
-    # stop the camera
+
+    ##########
+    ## Exit ##
+    finder_thread.join()
+    print("exited succesfully")
     if(camera):
         camera.StopGrabbing()
-
-    # exit
     cv2.destroyAllWindows()
     sys.exit()
+    ############
