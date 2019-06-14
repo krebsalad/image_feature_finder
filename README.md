@@ -12,27 +12,28 @@ startup:
 3. run python working_dir/feature_finder.py h
 
 
-features:
+log:
 1. get image edges
-2. fill within the edges
+2. fill within the edges and some other util
 3. identify contours based on hsv mask
 4. multiple hsv color ranges to indetify beans
 5. view mode only now possible
 6. make snapshots in view mode
-7. run with images out of a directory
-8. pick a color from image at runtime and display corresponding mask
-9. save the new feature in a json file
-10. load features from json file
-11. only requires image queue
+7. tested with camera
+8. run with images out of a directory
+9. pick a color from image at runtime and display corresponding mask
+10. save the new feature in a json file
+11. load features from json fill  
 12. can change image dimensions runtime
 13. track difference between images and prevent unneeded processing
-14. hsv color slider with arrow keys
+14. hsv value  slider with arrow keys
 15. multithreading mode (nodisplay, seperate lists using locks)
-
+16. added custom image buffer
+17. 
 
 Todo:
  
 1. add watershed to separate colling beans
-2. test with actual camera
-3. save output to file
-4. use queues instead of lists
+2. method to add new solutions
+3. update base images routine
+4. faster image sharing using semafores
