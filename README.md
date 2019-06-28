@@ -1,6 +1,7 @@
 # image_feature_finder
 opencv python w basler camera ellipse like objects finding helper tools
-  - can identify ellipse like objects, for example: beans
+  - can identify ellipse like objects, for example: beans using hsv color ranges
+  - help pick said color range
 
 required:
 1. pyplon camera
