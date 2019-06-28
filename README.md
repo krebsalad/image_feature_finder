@@ -1,5 +1,6 @@
 # image_feature_finder
-opencv python w basler camera bean finding helper tools
+opencv python w basler camera ellipse like objects finding helper tools
+  - can identify ellipse like objects, for example: beans
 
 required:
 1. pyplon camera
